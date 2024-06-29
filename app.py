@@ -1,7 +1,14 @@
+import logging
+import secrets
 from flask import Flask, request, jsonify
 from flask_mysqldb import MySQL
 from flask_jwt_extended import JWTManager, create_access_token, jwt_required, get_jwt_identity, unset_jwt_cookies
 from flask_cors import CORS
+import time
+import openai
+from zhipuai import ZhipuAI
+from transformers import AutoTokenizer
+
 
 app = Flask(__name__)
 CORS(app, resources={r"/*": {"origins": "http://localhost:5173"}}, supports_credentials=True)
@@ -20,6 +27,8 @@ app.config['JWT_TOKEN_LOCATION'] = ['headers']  # 确保从 headers 获取 token
 app.config['JWT_ACCESS_TOKEN_EXPIRES'] = False  # 禁用 token 过期时间
 
 jwt = JWTManager(app)
+
+tokenizer = AutoTokenizer.from_pretrained("llama-7b-hf")
 
 
 # 定义User模型
@@ -51,8 +60,8 @@ def user_login():
             return jsonify({'status': 0, 'msg': '没有此用户', 'data': {}}), 404
         stored_password = user[2]
         if stored_password == user_password:
-            access_token = create_access_token(identity=user_name)
-            return jsonify({'status': 1, 'msg': '登录成功', 'data': {'access_token': access_token, 'user_name': user_name}})
+            access_token = create_access_token(identity={'user_id': user[0], 'user_name': user_name})
+            return jsonify({'status': 1, 'msg': '登录成功', 'data': {'access_token': access_token, 'user_id': user[0], 'user_name': user_name}})
         else:
             return jsonify({'status': 0, 'msg': '用户名或密码错误', 'data': {}}), 401
 
@@ -137,9 +146,11 @@ def topup():
 @jwt_required()
 def get_money():
     try:
-        user_name = get_jwt_identity()
+        identity = get_jwt_identity()
+        user_id = identity['user_id']
+        # user_name = get_jwt_identity()
         cur = mysql.connection.cursor()
-        cur.execute("SELECT balance FROM user WHERE user_name = %s", (user_name,))
+        cur.execute("SELECT balance FROM user WHERE user_id = %s", (user_id,))
         balance = cur.fetchone()[0]
         cur.close()
         return jsonify({'status': 1, 'msg': '获取余额成功', 'data': {'balance': balance}})
@@ -266,9 +277,11 @@ def activeCard():
 @jwt_required()
 def get_user_info():
     try:
-        user_name = get_jwt_identity()
+        identity = get_jwt_identity()
+        user_id = identity['user_id']
+        # user_name = get_jwt_identity()
         cur = mysql.connection.cursor()
-        cur.execute("SELECT user_id, user_name, user_password, user_email, user_phone FROM user WHERE user_name = %s", (user_name,))
+        cur.execute("SELECT user_id, user_name, user_password, user_email, user_phone FROM user WHERE user_id = %s", (user_id,))
         user = cur.fetchone()
         print(user)
         cur.close()
@@ -293,7 +306,8 @@ def get_user_info():
 def edit_user_info():
     try:
         data = request.get_json()
-        user_name = get_jwt_identity()
+        identity = get_jwt_identity()
+        user_name = identity['user_name']
         user_password = data.get('user_password')
         user_phone = data.get('user_phone')
         user_email = data.get('user_email')
@@ -442,11 +456,11 @@ class Card:
 def get_all_cards():
     try:
         cur = mysql.connection.cursor()
-        cur.execute("SELECT card_id, user_id, user_name, api_key, balance, card_status FROM card")
+        cur.execute("SELECT card_id, user_id, user_name, api_key, left_balance, card_status FROM card")
         cards = cur.fetchall()
         cur.close()
         if not cards:
-            return jsonify({'status': 0, 'msg': '没有模型数据', 'data': []})
+            return jsonify({'status': 0, 'msg': '没有卡段数据', 'data': []})
         card_list = [
             {
                 'card_id': card[0],
@@ -468,7 +482,7 @@ def get_all_cards():
 def search_card():
     user_name = request.args.get('user_name', '').strip()
     card_status = request.args.get('card_status', '').strip()
-    query = "SELECT card_id, user_id, user_name, api_key, balance, card_status FROM card WHERE 1=1"
+    query = "SELECT card_id, user_id, user_name, api_key, left_balance, card_status FROM card WHERE 1=1"
     params = []
     if user_name:
         query += " AND user_name LIKE %s"
@@ -581,14 +595,14 @@ def search_record():
         return jsonify({'status': 0, 'msg': '服务器内部错误', 'data': []}), 500
 
 
-# 普通用户获取本账户所有使用记录
 @app.route('/user_allRecords', methods=['GET'])
 @jwt_required()
 def get_user_records():
-    user_name = get_jwt_identity()
     try:
+        identity = get_jwt_identity()
+        user_id = identity['user_id']
         cur = mysql.connection.cursor()
-        cur.execute("SELECT record_id, model_name, card_name, token_cost, price_cost FROM record WHERE user_name = %s", (user_name,))
+        cur.execute("SELECT record_id, model_name, card_name, token_cost, price_cost FROM record WHERE user_id = %s", (user_id,))
         records = cur.fetchall()
         cur.close()
 
@@ -615,7 +629,8 @@ def get_user_records():
 @app.route('/user_searchRecord', methods=['GET'])
 @jwt_required()
 def user_search_record():
-    user_name = get_jwt_identity()
+    identity = get_jwt_identity()
+    user_name = identity['user_name']
     model_name = request.args.get('model_name', '').strip()
     card_name = request.args.get('card_name', '').strip()
     query = "SELECT record_id, model_name, card_name, token_cost, price_cost FROM record WHERE user_name = %s"
@@ -657,7 +672,8 @@ def user_search_record():
 @app.route('/user_searchCard', methods=['GET'])
 @jwt_required()
 def user_search_card():
-    user_name = get_jwt_identity()
+    identity = get_jwt_identity()
+    user_name = identity['user_name']
     card_name = request.args.get('card_name', '').strip()
     card_status = request.args.get('card_status', '').strip()
     query = "SELECT card_id, card_name, card_status, used_balance, left_balance FROM card WHERE user_name = %s"
@@ -696,10 +712,12 @@ def user_search_card():
 @app.route('/user_allCards', methods=['GET'])
 @jwt_required()
 def get_user_cards():
-    user_name = get_jwt_identity()
+    # user_name = get_jwt_identity()
+    identity = get_jwt_identity()
+    user_id = identity['user_id']
     try:
         cur = mysql.connection.cursor()
-        cur.execute("SELECT card_id, card_name, card_status, used_balance, left_balance FROM card WHERE user_name = %s", (user_name,))
+        cur.execute("SELECT card_id, card_name, api_key, card_status, used_balance, left_balance FROM card WHERE user_id = %s", (user_id,))
         cards = cur.fetchall()
         cur.close()
         if not cards:
@@ -708,9 +726,10 @@ def get_user_cards():
             {
                 'card_id': card[0],
                 'card_name': card[1],
-                'card_status': card[2],
-                'used_balance': card[3],
-                'left_balance': card[4]
+                'api_key': card[2],
+                'card_status': card[3],
+                'used_balance': card[4],
+                'left_balance': card[5]
             } for card in cards
         ]
 
@@ -719,6 +738,232 @@ def get_user_cards():
         print(f"Error: {e}")
         return jsonify({'status': 0, 'msg': '服务器内部错误', 'data': []}), 500
 
+
+def invoke_openai(api_key, model_name, messages, stop, max_tokens, temperature, top_p):
+    backoff_time = 1
+    if 'llama' in model_name:
+        openai.api_base = "http://172.22.159.80:7861"
+        openai.api_key = api_key
+        while True:
+            try:
+                return openai.ChatCompletion.create(
+                    messages=messages,
+                    model=model_name,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    stop=stop
+                )
+            except Exception as e:
+                print(e, f' Sleeping {backoff_time} seconds...')
+                time.sleep(backoff_time)
+                backoff_time *= 1.5
+    elif 'glm' in model_name:
+        model = ZhipuAI(api_key=api_key)
+        backoff_time = 1
+        while True:
+            try:
+                return model.chat.completions.create(
+                    messages=messages,
+                    model=model_name,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    stop=stop
+                )
+            except Exception as e:
+                print(e, f' Sleeping {backoff_time} seconds...')
+                time.sleep(backoff_time)
+                backoff_time *= 1.5
+    else:
+        openai.api_key = api_key
+        while True:
+            try:
+                return openai.ChatCompletion.create(
+                    messages=messages,
+                    model=model_name,
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    top_p=top_p,
+                    stop=stop
+                )
+            except Exception as e:
+                print(e, f' Sleeping {backoff_time} seconds...')
+                time.sleep(backoff_time)
+                backoff_time *= 1.5
+
+
+@app.route("/chat/completions", methods=['POST'])
+@jwt_required()
+def inference():
+    try:
+        user_id = get_jwt_identity()['user_id']
+        user_name = get_jwt_identity()['user_name']
+        para = request.json
+        model = para["model"]
+        messages = para["messages"]
+        stop_words = para.get('stop', [])
+        max_new_tokens = para.get('max_tokens', 2048)
+        temperature = para.get('temperature', 1.0)
+        top_p = para.get('top_p', 1.0)
+        headers = request.headers
+        api_key = headers.get('authorization').replace('Bearer ', '')
+
+        contents = []
+        for message in messages:
+            if isinstance(message["content"], str):
+                contents.append(message["content"])
+        input_tokens_count = 0
+        for content in contents:
+            input_tokens_count += len(tokenizer.encode(content))
+        cur = mysql.connection.cursor()
+        query = "SELECT model_id, model_name, model_price FROM model WHERE model_name = %s"
+        cur.execute(query, (model,))
+        model_details = cur.fetchone()
+        model_id = model_details[0]
+        model_name = model_details[1]
+        model_price = model_details[2]
+
+        query = "SELECT card_id, card_name, left_balance FROM card WHERE api_key = %s"
+        cur.execute(query, (api_key,))
+        card_details = cur.fetchone()
+        card_id = card_details[0]
+        card_name = card_details[1]
+        left_balance = cur.fetchone()[2]
+
+        query = "SELECT used_balance FROM card WHERE api_key = %s"
+        cur.execute(query, (api_key,))
+        used_balance = cur.fetchone()[0]
+
+        input_token_cost = input_tokens_count * model_price
+        if left_balance < input_token_cost:
+            return jsonify({"msg": "Insufficient balance"}), 400
+
+        response = invoke_openai(api_key, model, messages, stop_words, max_new_tokens, temperature, top_p)
+        output_tokens_count = len(tokenizer.encode(response.choices[0].message.content))
+        token_cost = input_token_cost + output_tokens_count * model_price
+        token_count = input_tokens_count + output_tokens_count
+        new_left_balance = left_balance - token_cost
+        new_used_balance = used_balance + token_cost
+        query = "UPDATE card SET left_balance = %s WHERE api_key = %s"
+        cur.execute(query, (new_left_balance, api_key))
+        query = "UPDATE card SET used_balance = %s WHERE api_key = %s"
+        cur.execute(query, (new_used_balance, api_key))
+        cur.execute(
+            "INSERT INTO card (user_id, user_name, model_id, card_id, card_name, model_name, token_cost, price_cost) VALUES (%s, %s, %s,%s, %s, %s, %s)",
+            (user_id, user_name, model_id, card_id, card_name, model_name, token_count, token_cost))
+        mysql.connection.commit()
+        return jsonify(response)
+
+    except Exception as e:
+        logging.exception(str(e))
+        print(f"Error: {e}")
+
+
+# 普通用户添加卡段
+@app.route('/addCard', methods=['POST'])
+@jwt_required()
+def addCard():
+    try:
+        data = request.get_json()
+        card_name = data.get('card_name')
+        card_status = int(data.get('card_status'))
+        left_balance = data.get('left_balance')
+        user_name = get_jwt_identity()['user_name']
+        user_id = get_jwt_identity()['user_id']
+        if not card_name or not card_status or not left_balance:
+            return jsonify({'status': 0, 'msg': '请填写完整的卡段信息', 'data': {}}), 400
+        api_key = secrets.token_hex(16)
+        used_balance = 0
+        cur = mysql.connection.cursor()
+        cur.execute("INSERT INTO card (user_id, user_name, card_name, api_key, card_status, used_balance, left_balance) VALUES (%s, %s, %s,%s, %s, %s, %s)",
+                    (user_id, user_name, card_name, api_key, card_status, used_balance, left_balance))
+        query = "SELECT balance FROM user WHERE user_id = %s"
+        cur.execute(query, (user_id,))
+        balance = cur.fetchone()[0]
+        changed_balance = int(balance) - int(left_balance)
+        print(changed_balance)
+        query = "UPDATE user SET balance = %s WHERE user_id = %s"
+        cur.execute(query, (changed_balance, user_id))
+        mysql.connection.commit()
+        cur.close()
+        return jsonify({'status': 1, 'msg': '卡段添加成功', 'data': {}}), 200
+
+    except KeyError as e:
+        return jsonify({'status': 0, 'msg': f'缺少必要字段 {str(e)}', 'data': {}}), 400
+
+    except Exception as e:
+        print(f"Error in addCard route: {e}")
+        return jsonify({'status': 0, 'msg': '服务器内部错误', 'data': {}}), 500
+
+
+# 普通用户编辑卡段
+@app.route('/editCard', methods=['PUT'])
+@jwt_required()
+def editCard():
+    try:
+        data = request.get_json()
+        print(data)
+        card_id = data.get('card_id')
+        card_name = data.get('card_name')
+        card_status = int(data.get('card_status'))
+        new_left_balance = data.get('left_balance')
+        user_id = get_jwt_identity()['user_id']
+        cur = mysql.connection.cursor()
+        query = "SELECT left_balance FROM card WHERE card_id = %s"
+        cur.execute(query, (card_id,))
+        old_left_balance = cur.fetchone()[0]
+        print(old_left_balance)
+        cur.execute(
+            "UPDATE card SET card_name = %s, card_status = %s, left_balance = %s WHERE card_id = %s",
+            (card_name, card_status, new_left_balance, card_id))
+        query = "SELECT balance FROM user WHERE user_id = %s"
+        cur.execute(query, (user_id,))
+        balance = cur.fetchone()[0]
+        print(balance)
+        if int(old_left_balance) != int(new_left_balance):
+            if int(new_left_balance) > int(old_left_balance):
+                new_balance = int(balance) - (int(new_left_balance) - int(old_left_balance))
+            if int(new_left_balance) < int(old_left_balance):
+                new_balance = int(balance) + (int(old_left_balance) - int(new_left_balance))
+            query = "UPDATE user SET balance = %s WHERE user_id = %s"
+            cur.execute(query, (new_balance, user_id))
+            print(new_balance)
+        mysql.connection.commit()
+        cur.close()
+        return jsonify({'status': 1, 'msg': '卡段修改成功', 'data': {}}), 200
+    except Exception as e:
+        print(f"Error in editModel route: {e}")
+        return jsonify({'status': 0, 'msg': '服务器内部错误', 'data': {}}), 500
+
+
+# 普通用户删除卡段
+@app.route('/delCard', methods=['DELETE'])
+@jwt_required()
+def user_delCard():
+    try:
+        card_id = request.args.get('card_id')
+        user_id = get_jwt_identity()['user_id']
+        cur = mysql.connection.cursor()
+        query = "SELECT left_balance FROM card WHERE card_id = %s"
+        cur.execute(query, (card_id,))
+        left_balance = cur.fetchone()[0]
+        print(left_balance)
+        query = "SELECT balance FROM user WHERE user_id = %s"
+        cur.execute(query, (user_id,))
+        balance = cur.fetchone()[0]
+        print(balance)
+        new_balance = int(balance) + int(left_balance)
+        print(new_balance)
+        query = "UPDATE user SET balance = %s WHERE user_id = %s"
+        cur.execute(query, (new_balance, user_id))
+        cur.execute("DELETE FROM card WHERE card_id = %s", (card_id,))
+        mysql.connection.commit()
+        cur.close()
+        return jsonify({'status': 1, 'message': '卡段删除成功'})
+    except Exception as e:
+        print(f"Error in delModel route: {e}")
+        return jsonify({'status': 0, 'message': str(e)})
 
 if __name__ == '__main__':
     app.run(debug=True)
