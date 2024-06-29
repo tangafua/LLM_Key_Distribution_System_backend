@@ -532,23 +532,26 @@ class Record:
 def get_all_records():
     try:
         cur = mysql.connection.cursor()
-        cur.execute("SELECT record_id, user_id, user_name, model_id, card_id, card_name, model_name, token_cost, price_cost FROM record")
+        query = ("SELECT u.user_id, u.user_name, r.record_id, m.model_id, c.card_id, c.card_name, m.model_name, r.token_cost, r.price_cost "
+                 "FROM user u JOIN record r ON r.user_id = u.user_id JOIN model m ON r.model_id = m.model_id "
+                 "JOIN card c ON r.card_id = c.card_id WHERE 1=1")
+        cur.execute(query)
         records = cur.fetchall()
         cur.close()
         if not records:
             return jsonify({'status': 0, 'msg': '没有使用记录数据', 'data': []})
         record_list = [
             {
-                'record_id': card[0],
-                'user_id': card[1],
-                'user_name': card[2],
-                'model_id': card[3],
-                'card_id': card[4],
-                'card_name': card[5],
-                'model_name': card[6],
-                'token_cost': card[7],
-                'price_cost': card[8]
-            } for card in records
+                'user_id': record[0],
+                'user_name': record[1],
+                'record_id': record[2],
+                'model_id': record[3],
+                'card_id': record[4],
+                'card_name': record[5],
+                'model_name': record[6],
+                'token_cost': record[7],
+                'price_cost': record[8]
+            } for record in records
         ]
         return jsonify({'status': 1, 'msg': '成功获取使用记录列表', 'data': record_list})
     except Exception as e:
@@ -561,26 +564,35 @@ def get_all_records():
 def search_record():
     user_name = request.args.get('user_name', '').strip()
     model_name = request.args.get('model_name', '').strip()
-    query = "SELECT record_id, user_id, user_name, model_id, card_id, card_name, model_name, token_cost, price_cost FROM record WHERE 1=1"
+
+    query = (
+        "SELECT u.user_id, u.user_name, r.record_id, m.model_id, c.card_id, c.card_name, m.model_name, r.token_cost, r.price_cost "
+        "FROM user u JOIN record r ON r.user_id = u.user_id "
+        "JOIN model m ON r.model_id = m.model_id "
+        "JOIN card c ON r.card_id = c.card_id "
+        "WHERE 1=1")
     params = []
     if user_name:
-        query += " AND user_name LIKE %s"
+        query += " AND u.user_name LIKE %s"
         params.append(f"%{user_name}%")
     if model_name:
-        query += " AND model_name LIKE %s"
+        query += " AND m.model_name LIKE %s"
         params.append(f"%{model_name}%")
+
     try:
         cur = mysql.connection.cursor()
         cur.execute(query, tuple(params))
         records = cur.fetchall()
         cur.close()
+
         if not records:
             return jsonify({'status': 0, 'msg': '没有找到符合条件的使用记录', 'data': []})
+
         record_list = [
             {
-                'record_id': record[0],
-                'user_id': record[1],
-                'user_name': record[2],
+                'user_id': record[0],
+                'user_name': record[1],
+                'record_id': record[2],
                 'model_id': record[3],
                 'card_id': record[4],
                 'card_name': record[5],
@@ -589,11 +601,11 @@ def search_record():
                 'price_cost': record[8]
             } for record in records
         ]
+
         return jsonify({'status': 1, 'msg': '成功搜索使用记录', 'data': record_list})
     except Exception as e:
         print(f"Error: {e}")
         return jsonify({'status': 0, 'msg': '服务器内部错误', 'data': []}), 500
-
 
 @app.route('/user_allRecords', methods=['GET'])
 @jwt_required()
@@ -602,7 +614,11 @@ def get_user_records():
         identity = get_jwt_identity()
         user_id = identity['user_id']
         cur = mysql.connection.cursor()
-        cur.execute("SELECT record_id, model_name, card_name, token_cost, price_cost FROM record WHERE user_id = %s", (user_id,))
+        query = (
+            "SELECT r.record_id, m.model_id, c.card_id, c.card_name, m.model_name, r.token_cost, r.price_cost "
+            "FROM record r JOIN model m ON r.model_id = m.model_id "
+            "JOIN card c ON r.card_id = c.card_id WHERE r.user_id = %s")
+        cur.execute(query, (user_id,))
         records = cur.fetchall()
         cur.close()
 
@@ -612,10 +628,12 @@ def get_user_records():
         record_list = [
             {
                 'record_id': record[0],
-                'model_name': record[1],
-                'card_name': record[2],
-                'token_cost': record[3],
-                'price_cost': record[4]
+                'model_id': record[1],
+                'card_id': record[2],
+                'card_name': record[3],
+                'model_name': record[4],
+                'token_cost': record[5],
+                'price_cost': record[6]
             } for record in records
         ]
 
@@ -625,22 +643,28 @@ def get_user_records():
         return jsonify({'status': 0, 'msg': '服务器内部错误', 'data': []}), 500
 
 
-# 普通用户根据模型名称和卡段名称搜索自己的使用记录
 @app.route('/user_searchRecord', methods=['GET'])
 @jwt_required()
 def user_search_record():
     identity = get_jwt_identity()
-    user_name = identity['user_name']
+    user_id = identity['user_id']
     model_name = request.args.get('model_name', '').strip()
     card_name = request.args.get('card_name', '').strip()
-    query = "SELECT record_id, model_name, card_name, token_cost, price_cost FROM record WHERE user_name = %s"
-    params = [user_name]
+
+    query = (
+        "SELECT r.record_id, m.model_name, c.card_name, r.token_cost, r.price_cost "
+        "FROM record r "
+        "JOIN model m ON r.model_id = m.model_id "
+        "JOIN card c ON r.card_id = c.card_id "
+        "WHERE r.user_id = %s"
+    )
+    params = [user_id]
 
     if model_name:
-        query += " AND model_name LIKE %s"
+        query += " AND m.model_name LIKE %s"
         params.append(f"%{model_name}%")
     if card_name:
-        query += " AND card_name LIKE %s"
+        query += " AND c.card_name LIKE %s"
         params.append(f"%{card_name}%")
 
     try:
@@ -794,11 +818,8 @@ def invoke_openai(api_key, model_name, messages, stop, max_tokens, temperature, 
 
 
 @app.route("/chat/completions", methods=['POST'])
-@jwt_required()
 def inference():
     try:
-        user_id = get_jwt_identity()['user_id']
-        user_name = get_jwt_identity()['user_name']
         para = request.json
         model = para["model"]
         messages = para["messages"]
@@ -817,28 +838,29 @@ def inference():
         for content in contents:
             input_tokens_count += len(tokenizer.encode(content))
         cur = mysql.connection.cursor()
-        query = "SELECT model_id, model_name, model_price FROM model WHERE model_name = %s"
+
+        query = "SELECT model_id, model_price FROM model WHERE model_name = %s"
         cur.execute(query, (model,))
         model_details = cur.fetchone()
         model_id = model_details[0]
-        model_name = model_details[1]
-        model_price = model_details[2]
-
-        query = "SELECT card_id, card_name, left_balance FROM card WHERE api_key = %s"
+        model_price = model_details[1]
+        print(model_details)
+        query = "SELECT card_id, left_balance, used_balance FROM card WHERE api_key = %s"
         cur.execute(query, (api_key,))
         card_details = cur.fetchone()
         card_id = card_details[0]
-        card_name = card_details[1]
-        left_balance = cur.fetchone()[2]
-
-        query = "SELECT used_balance FROM card WHERE api_key = %s"
+        left_balance = card_details[1]
+        used_balance = card_details[2]
+        print(card_details)
+        query = "SELECT user_id, user_name FROM user WHERE user_id = (SELECT user_id FROM card WHERE api_key = %s)"
         cur.execute(query, (api_key,))
-        used_balance = cur.fetchone()[0]
-
+        user_details = cur.fetchone()
+        user_id = user_details[0]
+        print(user_id)
         input_token_cost = input_tokens_count * model_price
         if left_balance < input_token_cost:
             return jsonify({"msg": "Insufficient balance"}), 400
-
+        print(input_token_cost)
         response = invoke_openai(api_key, model, messages, stop_words, max_new_tokens, temperature, top_p)
         output_tokens_count = len(tokenizer.encode(response.choices[0].message.content))
         token_cost = input_token_cost + output_tokens_count * model_price
@@ -849,9 +871,8 @@ def inference():
         cur.execute(query, (new_left_balance, api_key))
         query = "UPDATE card SET used_balance = %s WHERE api_key = %s"
         cur.execute(query, (new_used_balance, api_key))
-        cur.execute(
-            "INSERT INTO card (user_id, user_name, model_id, card_id, card_name, model_name, token_cost, price_cost) VALUES (%s, %s, %s,%s, %s, %s, %s)",
-            (user_id, user_name, model_id, card_id, card_name, model_name, token_count, token_cost))
+        query = "INSERT INTO record (user_id, model_id, card_id, token_cost, price_cost) VALUES (%s, %s, %s, %s, %s)"
+        cur.execute(query, (user_id, model_id, card_id, token_count, token_cost))
         mysql.connection.commit()
         return jsonify(response)
 
